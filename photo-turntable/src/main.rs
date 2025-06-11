@@ -2,6 +2,7 @@ use app::TurntableApp;
 use eframe::NativeOptions;
 
 mod app;
+mod camera;
 mod turntable;
 
 fn main() -> Result<(), eframe::Error> {

@@ -1,6 +1,7 @@
 mod worker;
 
 use self::worker::{Worker, WorkerCommand, WorkerState};
+use crate::camera::Camera;
 use crate::turntable::Turntable;
 
 use eframe::egui::{Color32, Layout, Stroke, Vec2};
@@ -33,6 +34,7 @@ impl<T: Turntable> TurntableApp<T> {
                 cmd_rx,
                 state_tx,
                 table: None,
+                camera: Camera::new().expect("Couldn't create camera!"),
             };
             rt.block_on(worker.run());
         });

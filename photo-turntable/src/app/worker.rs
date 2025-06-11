@@ -1,4 +1,4 @@
-use crate::turntable::Turntable;
+use crate::{camera::Camera, turntable::Turntable};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug, Clone)]
@@ -28,6 +28,7 @@ pub(super) struct Worker<T: Turntable> {
     pub(super) cmd_rx: UnboundedReceiver<WorkerCommand>,
     pub(super) state_tx: UnboundedSender<WorkerState>,
     pub(super) table: Option<T>,
+    pub(super) camera: Camera,
 }
 
 impl<T: Turntable> Worker<T> {
@@ -109,6 +110,7 @@ impl<T: Turntable> Worker<T> {
                                         steps_total: total_steps,
                                     };
                                     let _ = self.state_tx.send(state.clone());
+                                    self.camera.capture().unwrap();
                                     tbl.step_horizontal(rotation_steps).await?;
                                 }
                                 if i_tilt < (tilt_steps - 1) {

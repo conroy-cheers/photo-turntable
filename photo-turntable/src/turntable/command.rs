@@ -55,8 +55,14 @@ mod tests {
 
     #[test]
     fn test_command_strings() {
-        assert_eq!(Command::SetRotationSpeed(35.64).to_string(), "+CT,TURNSPEED=35.64;");
-        assert_eq!(Command::RotateBy(-30.5).to_string(), "+CT,TURNANGLE=-30.50;");
+        assert_eq!(
+            Command::SetRotationSpeed(35.64).to_string(),
+            "+CT,TURNSPEED=35.64;"
+        );
+        assert_eq!(
+            Command::RotateBy(-30.5).to_string(),
+            "+CT,TURNANGLE=-30.50;"
+        );
         assert_eq!(Command::StopRotation.to_string(), "+CT,STOP;");
         assert_eq!(Command::ZeroTilt.to_string(), "+CR,TOZERO;");
         assert_eq!(Command::QueryAngle.to_string(), "+QT,CHANGEANGLE;");
