@@ -47,11 +47,11 @@
       packages = forEachSystem (
         { pkgs, system }:
         let
-          revopoint-photo-turntable = (build pkgs);
+          photo-turntable = (build pkgs);
         in
         {
-          inherit revopoint-photo-turntable;
-          default = revopoint-photo-turntable;
+          inherit photo-turntable;
+          default = photo-turntable;
         }
       );
 

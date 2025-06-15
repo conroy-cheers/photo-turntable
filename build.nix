@@ -12,11 +12,11 @@ let
   };
 in
 rustPlatform.buildRustPackage (finalAttrs: {
-  pname = "revopoint-photo-turntable";
+  pname = "photo-turntable";
   version = "0.1.0";
 
   src = ./photo-turntable;
-  cargoHash = "sha256-SROiAZvXSpaGA5FPG0jze1Mf3IXCrmz0CFNtrRdqluw=";
+  cargoHash = "sha256-ajkQwrXQAsKS7XXpvnaR+OQI7MfPUHjt0/ARfEbXagQ=";
 
   buildInputs = [
     libgphoto2

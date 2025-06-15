@@ -9,5 +9,7 @@ btleplug = "0.11.8"
 eframe = "0.31.1"
 egui_double_slider = "0.7.1"
 gphoto2 = "3.4.1"
+image = "0.25.6"
+mime2ext = "0.1.54"
 tokio = { version = "1.45.1", features = ["full", "time"] }
 uuid = { version = "1.17.0", features = ["v4"] }

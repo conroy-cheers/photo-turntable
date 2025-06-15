@@ -1,8 +1,12 @@
-use crate::{camera::Camera, turntable::Turntable};
+use crate::{
+    app::worker::worker_camera::{CameraWorkerCommand, CameraWorkerState},
+    turntable::Turntable,
+};
+use anyhow::anyhow;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug, Clone)]
-pub(super) enum WorkerState {
+pub(crate) enum TurntableWorkerState {
     Uninitialised,
     Connecting,
     Connected,
@@ -11,7 +15,7 @@ pub(super) enum WorkerState {
 }
 
 #[derive(Debug)]
-pub(super) enum WorkerCommand {
+pub(crate) enum TurntableWorkerCommand {
     Connect,
     Disconnect,
     ResetPosition,
@@ -24,64 +28,80 @@ pub(super) enum WorkerCommand {
 }
 
 /// Tokio worker for managing a Turntable instance
-pub(super) struct Worker<T: Turntable> {
-    pub(super) cmd_rx: UnboundedReceiver<WorkerCommand>,
-    pub(super) state_tx: UnboundedSender<WorkerState>,
-    pub(super) table: Option<T>,
-    pub(super) camera: Camera,
+pub(crate) struct TurntableWorker<T: Turntable> {
+    cmd_rx: UnboundedReceiver<TurntableWorkerCommand>,
+    state_tx: UnboundedSender<TurntableWorkerState>,
+    camera_cmd_tx: UnboundedSender<CameraWorkerCommand>,
+    camera_state_rx: UnboundedReceiver<CameraWorkerState>,
+    table: Option<T>,
 }
 
-impl<T: Turntable> Worker<T> {
-    pub(super) async fn run(mut self) {
-        let mut state = WorkerState::Uninitialised;
+impl<T: Turntable> TurntableWorker<T> {
+    pub(crate) fn new(
+        cmd_rx: UnboundedReceiver<TurntableWorkerCommand>,
+        state_tx: UnboundedSender<TurntableWorkerState>,
+        camera_cmd_tx: UnboundedSender<CameraWorkerCommand>,
+        camera_state_rx: UnboundedReceiver<CameraWorkerState>,
+    ) -> Self {
+        Self {
+            cmd_rx,
+            state_tx,
+            camera_cmd_tx,
+            camera_state_rx,
+            table: None,
+        }
+    }
+
+    pub(crate) async fn run(mut self) {
+        let mut state = TurntableWorkerState::Uninitialised;
         let _ = self.state_tx.send(state.clone());
 
         while let Some(cmd) = self.cmd_rx.recv().await {
             match cmd {
-                WorkerCommand::Connect => {
-                    state = WorkerState::Connecting;
+                TurntableWorkerCommand::Connect => {
+                    state = TurntableWorkerState::Connecting;
                     let _ = self.state_tx.send(state.clone());
                     match T::connect().await {
                         Ok(mut tbl) => match tbl.configure().await {
                             Ok(_) => {
                                 self.table = Some(tbl);
-                                state = WorkerState::Connected;
+                                state = TurntableWorkerState::Connected;
                                 let _ = self.state_tx.send(state.clone());
                             }
                             Err(e) => {
                                 eprintln!("Configuration error: {:?}", e);
-                                state = WorkerState::Uninitialised;
+                                state = TurntableWorkerState::Uninitialised;
                                 let _ = self.state_tx.send(state.clone());
                             }
                         },
                         Err(e) => {
                             eprintln!("Connect error: {:?}", e);
-                            state = WorkerState::Uninitialised;
+                            state = TurntableWorkerState::Uninitialised;
                             let _ = self.state_tx.send(state.clone());
                         }
                     }
                 }
-                WorkerCommand::Disconnect => {
+                TurntableWorkerCommand::Disconnect => {
                     if let Some(tbl) = self.table.as_mut() {
                         match tbl.disconnect().await {
                             Ok(_) => {}
                             Err(_) => {}
                         };
                         self.table = None;
-                        state = WorkerState::Uninitialised;
+                        state = TurntableWorkerState::Uninitialised;
                         let _ = self.state_tx.send(state.clone());
                     }
                 }
-                WorkerCommand::ResetPosition => {
+                TurntableWorkerCommand::ResetPosition => {
                     if let Some(tbl) = self.table.as_mut() {
-                        state = WorkerState::ReturningToResetPosition;
+                        state = TurntableWorkerState::ReturningToResetPosition;
                         let _ = self.state_tx.send(state.clone());
                         tbl.reset_pos().await.unwrap();
-                        state = WorkerState::Connected;
+                        state = TurntableWorkerState::Connected;
                         let _ = self.state_tx.send(state.clone());
                     }
                 }
-                WorkerCommand::Step {
+                TurntableWorkerCommand::Step {
                     rotation_steps,
                     tilt_lower,
                     tilt_upper,
@@ -92,7 +112,7 @@ impl<T: Turntable> Worker<T> {
                             T::compute_tilt_step(tilt_lower, tilt_upper, tilt_steps);
                         let total_steps = rotation_steps * tilt_steps;
 
-                        let _ = self.state_tx.send(WorkerState::Stepping {
+                        let _ = self.state_tx.send(TurntableWorkerState::Stepping {
                             step_count: 0,
                             steps_total: total_steps,
                         });
@@ -105,12 +125,43 @@ impl<T: Turntable> Worker<T> {
                             for i_tilt in 0..tilt_steps {
                                 // Perform full rotation
                                 for i_rotate in 1..=rotation_steps {
-                                    state = WorkerState::Stepping {
+                                    state = TurntableWorkerState::Stepping {
                                         step_count: (i_tilt * rotation_steps) + i_rotate,
                                         steps_total: total_steps,
                                     };
                                     let _ = self.state_tx.send(state.clone());
-                                    self.camera.capture().unwrap();
+
+                                    let seq = i_rotate as u32;
+                                    match self
+                                        .camera_cmd_tx
+                                        .send(CameraWorkerCommand::CaptureImage { seq })
+                                    {
+                                        Ok(_) => {
+                                            // Wait for camera worker state to first go to Capturing, then for it to exit Capturing.
+                                            while match self.camera_state_rx.recv().await {
+                                                Some(CameraWorkerState::Capturing {
+                                                    seq: recvd_seq,
+                                                }) => {
+                                                    // If recvd_seq is our requested seq, break.
+                                                    recvd_seq != seq
+                                                }
+                                                _ => true, // keep looping
+                                            } {}
+                                            // Wait for camera worker state to no longer be Capturing
+                                            while match self.camera_state_rx.recv().await {
+                                                Some(CameraWorkerState::Capturing { seq: _ }) => {
+                                                    true
+                                                }
+                                                None => true,
+                                                _ => false,
+                                            } {}
+                                        }
+                                        Err(_) => {
+                                            return Err(anyhow!(
+                                                "Unable to send command to camera worker"
+                                            ));
+                                        }
+                                    };
                                     tbl.step_horizontal(rotation_steps).await?;
                                 }
                                 if i_tilt < (tilt_steps - 1) {
@@ -131,7 +182,7 @@ impl<T: Turntable> Worker<T> {
                             }
                         }
 
-                        state = WorkerState::Connected;
+                        state = TurntableWorkerState::Connected;
                         let _ = self.state_tx.send(state.clone());
                     }
                 }
