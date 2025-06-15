@@ -13,9 +13,6 @@ use crate::app::{worker::worker_camera::ImageHandle, ImagePreview};
 pub async fn image_loader(
     mut camera_imagepath_rx: UnboundedReceiver<ImageHandle>,
     image_tx: UnboundedSender<ImagePreview>,
-    // ctx: Context,
-    max_width: u32,
-    max_height: u32,
 ) {
     // Keep track of all in‐flight loads
     let mut join_set: JoinSet<()> = JoinSet::new();
@@ -28,7 +25,7 @@ pub async fn image_loader(
 
         // Spawn blocking work for image decoding & resizing
         join_set.spawn_blocking(move || {
-            match ImagePreview::load(&path, max_width, max_height).and_then(|preview| {
+            match ImagePreview::load(handle.seq, &path).and_then(|preview| {
                 tx.send(preview)
                     .map_err(|e| anyhow::anyhow!("Send error: {}", e))
             }) {

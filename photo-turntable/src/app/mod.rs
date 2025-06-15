@@ -19,10 +19,8 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use anyhow::anyhow;
 
-const DEFAULT_PREVIEW_HEIGHT: u32 = 200;
-const DEFAULT_PREVIEW_WIDTH: u32 = 300;
-
 struct ImagePreview {
+    seq: u32,
     path: PathBuf,
     thumb: Option<ColorImage>,
     texture: Option<TextureHandle>,
@@ -30,19 +28,34 @@ struct ImagePreview {
 
 impl ImagePreview {
     /// Load and resize image, returning egui texture
-    fn load(path: &Path, max_width: u32, max_height: u32) -> anyhow::Result<Self> {
-        let img = image::ImageReader::open(path)?.decode()?;
-        let resized = image::imageops::thumbnail(&img, max_width, max_height);
+    fn load(seq: u32, path: &Path) -> anyhow::Result<Self> {
+        let jpeg_data = std::fs::read(path)?;
 
-        let size = [resized.width() as usize, resized.height() as usize];
-        let pixels = resized
-            .chunks(4)
-            .map(|px| egui::Color32::from_rgba_premultiplied(px[0], px[1], px[2], px[3]))
-            .collect();
+        // initialize a decompressor with the scaling factor
+        let mut decompressor = turbojpeg::Decompressor::new()?;
+        let scaling = turbojpeg::ScalingFactor::ONE_EIGHTH;
+        decompressor.set_scaling_factor(scaling)?;
 
-        let color_image = ColorImage { size, pixels };
+        // read the JPEG header and downscale the width and height
+        let scaled_header = decompressor.read_header(&jpeg_data)?.scaled(scaling);
+
+        // initialize the image (Image<Vec<u8>>)
+        let mut image = turbojpeg::Image {
+            pixels: vec![0; 4 * scaled_header.width * scaled_header.height],
+            width: scaled_header.width,
+            pitch: 4 * scaled_header.width, // size of one image row in memory
+            height: scaled_header.height,
+            format: turbojpeg::PixelFormat::RGBA,
+        };
+
+        // decompress the JPEG into the image
+        // (we use as_deref_mut() to convert from &mut Image<Vec<u8>> into Image<&mut [u8]>)
+        decompressor.decompress(&jpeg_data, image.as_deref_mut())?;
+
+        let color_image = ColorImage::from_rgba_unmultiplied([image.width, image.height], &image.pixels);
 
         Ok(Self {
+            seq,
             path: path.to_path_buf(),
             thumb: Some(color_image),
             texture: None,
@@ -122,12 +135,7 @@ impl<T: Turntable> TurntableApp<T> {
         // Spawn image loader
         std::thread::spawn(move || {
             let rt = Runtime::new().unwrap();
-            rt.block_on(worker::image_loader(
-                camera_imagepath_rx,
-                image_tx,
-                DEFAULT_PREVIEW_WIDTH,
-                DEFAULT_PREVIEW_HEIGHT,
-            ));
+            rt.block_on(worker::image_loader(camera_imagepath_rx, image_tx));
         });
 
         Self {
@@ -165,6 +173,7 @@ impl<T: Turntable> App for TurntableApp<T> {
                 Ok(_) => self.images.push(image),
                 Err(_) => eprintln!("Error loading decoded image {:?}", image.path),
             }
+            self.images.sort_by_key(|img| img.seq);
         }
 
         // Build UI

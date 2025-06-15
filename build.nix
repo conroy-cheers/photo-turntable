@@ -2,6 +2,7 @@
   lib,
   makeRustPlatform,
   rust-bin,
+  cmake,
   pkg-config,
   libgphoto2,
 }:
@@ -24,6 +25,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   nativeBuildInputs = [
     pkg-config
+    cmake
   ];
 
   meta = {
