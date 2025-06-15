@@ -7,27 +7,30 @@ use crate::app::worker::{CameraWorker, CameraWorkerCommand, CameraWorkerState};
 use crate::camera::CameraSpec;
 use crate::turntable::Turntable;
 
-use eframe::egui::{Color32, ColorImage, Layout, Stroke, TextureHandle, Vec2};
+use eframe::egui::load::SizedTexture;
+use eframe::egui::{
+    Color32, ColorImage, Context, ImageSource, Layout, Stroke, TextureHandle, Vec2,
+};
 use eframe::emath::Align;
 use eframe::{egui, App, CreationContext, Frame};
 use tokio::runtime::Runtime;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::broadcast;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use anyhow::anyhow;
 
+const DEFAULT_PREVIEW_HEIGHT: u32 = 200;
+const DEFAULT_PREVIEW_WIDTH: u32 = 300;
+
 struct ImagePreview {
     path: PathBuf,
-    texture_handle: TextureHandle,
+    thumb: Option<ColorImage>,
+    texture: Option<TextureHandle>,
 }
 
 impl ImagePreview {
     /// Load and resize image, returning egui texture
-    fn load(
-        path: &Path,
-        ctx: &egui::Context,
-        max_width: u32,
-        max_height: u32,
-    ) -> anyhow::Result<Self> {
+    fn load(path: &Path, max_width: u32, max_height: u32) -> anyhow::Result<Self> {
         let img = image::ImageReader::open(path)?.decode()?;
         let resized = image::imageops::thumbnail(&img, max_width, max_height);
 
@@ -39,21 +42,28 @@ impl ImagePreview {
 
         let color_image = ColorImage { size, pixels };
 
-        let texture_name = path
+        Ok(Self {
+            path: path.to_path_buf(),
+            thumb: Some(color_image),
+            texture: None,
+        })
+    }
+
+    fn load_texture<'a>(&mut self, ctx: &Context) -> anyhow::Result<()> {
+        let texture_name = self
+            .path
             .file_stem()
             .ok_or(anyhow!("Image path has no file stem"))?
             .to_str()
             .ok_or(anyhow!("Unable to convert image path to string"))?;
-        let texture_handle = ctx.load_texture(
+        let image = std::mem::replace(&mut self.thumb, None);
+        let texture = ctx.load_texture(
             "preview_".to_string() + texture_name,
-            color_image,
+            image.unwrap(),
             egui::TextureOptions::default(),
         );
-
-        Ok(Self {
-            path: path.to_path_buf(),
-            texture_handle,
-        })
+        self.texture = Some(texture);
+        Ok(())
     }
 }
 
@@ -67,28 +77,32 @@ pub(crate) struct TurntableApp<T: Turntable> {
     tilt_steps: u16,
     selected_camera_spec: Option<CameraSpec>,
     camera_select_box_open: bool,
+    images: Vec<ImagePreview>,
     table_cmd_tx: UnboundedSender<TurntableWorkerCommand>,
     table_state_rx: UnboundedReceiver<TurntableWorkerState>,
     camera_cmd_tx: UnboundedSender<CameraWorkerCommand>,
-    camera_state_rx: UnboundedReceiver<CameraWorkerState>,
+    camera_state_rx: broadcast::Receiver<CameraWorkerState>,
+    image_rx: UnboundedReceiver<ImagePreview>,
     _marker: std::marker::PhantomData<T>,
 }
 
 impl<T: Turntable> TurntableApp<T> {
     pub(crate) fn new(_cc: &CreationContext<'_>) -> Self {
-        let (camera_cmd_tx, camera_cmd_rx) = unbounded_channel();
-        let (camera_state_tx, camera_state_rx) = unbounded_channel();
-        let (camera_to_table_state_tx, camera_to_table_state_rx) = unbounded_channel();
+        let (camera_cmd_tx, camera_cmd_rx) = mpsc::unbounded_channel();
+        let (camera_state_tx, camera_state_rx_1) = broadcast::channel(100);
+        let camera_state_rx_2 = camera_state_tx.subscribe();
+        let (camera_imagepath_tx, camera_imagepath_rx) = mpsc::unbounded_channel();
 
-        let (table_cmd_tx, table_cmd_rx) = unbounded_channel();
-        let (table_state_tx, table_state_rx) = unbounded_channel();
+        let (image_tx, image_rx) = mpsc::unbounded_channel();
+
+        let (table_cmd_tx, table_cmd_rx) = mpsc::unbounded_channel();
+        let (table_state_tx, table_state_rx) = mpsc::unbounded_channel();
 
         // Spawn Tokio runtime for camera worker
         std::thread::spawn(move || {
             let rt = Runtime::new().unwrap();
-            let worker =
-                CameraWorker::new(camera_cmd_rx, camera_state_tx, camera_to_table_state_tx)
-                    .expect("Could not create camera worker!");
+            let worker = CameraWorker::new(camera_cmd_rx, camera_state_tx, camera_imagepath_tx)
+                .expect("Could not create camera worker!");
             rt.block_on(worker.run());
         });
 
@@ -100,9 +114,20 @@ impl<T: Turntable> TurntableApp<T> {
                 table_cmd_rx,
                 table_state_tx,
                 camera_cmd_tx_for_tt,
-                camera_to_table_state_rx,
+                camera_state_rx_1,
             );
             rt.block_on(worker.run());
+        });
+
+        // Spawn image loader
+        std::thread::spawn(move || {
+            let rt = Runtime::new().unwrap();
+            rt.block_on(worker::image_loader(
+                camera_imagepath_rx,
+                image_tx,
+                DEFAULT_PREVIEW_WIDTH,
+                DEFAULT_PREVIEW_HEIGHT,
+            ));
         });
 
         Self {
@@ -114,10 +139,12 @@ impl<T: Turntable> TurntableApp<T> {
             tilt_steps: 1,
             selected_camera_spec: None,
             camera_select_box_open: false,
+            images: Vec::new(),
             table_cmd_tx,
             table_state_rx,
             camera_cmd_tx,
-            camera_state_rx,
+            camera_state_rx: camera_state_rx_2,
+            image_rx,
             _marker: std::marker::PhantomData,
         }
     }
@@ -131,6 +158,13 @@ impl<T: Turntable> App for TurntableApp<T> {
         }
         while let Ok(state) = self.camera_state_rx.try_recv() {
             self.camera_state = state;
+        }
+        // Receive any new images from worker
+        while let Ok(mut image) = self.image_rx.try_recv() {
+            match image.load_texture(ctx) {
+                Ok(_) => self.images.push(image),
+                Err(_) => eprintln!("Error loading decoded image {:?}", image.path),
+            }
         }
 
         // Build UI
@@ -288,7 +322,7 @@ impl<T: Turntable> App for TurntableApp<T> {
                         }
                     }
                     match &self.camera_state {
-                        CameraWorkerState::Disconnected | CameraWorkerState::CameraConnected => {}
+                        CameraWorkerState::Disconnected | CameraWorkerState::Ready => {}
                         CameraWorkerState::GettingCameraList
                         | CameraWorkerState::CameraConnecting
                         | CameraWorkerState::Capturing { seq: _ } => {
@@ -319,15 +353,33 @@ impl<T: Turntable> App for TurntableApp<T> {
                     });
             }
 
-            match self.camera_state {
-                CameraWorkerState::CameraConnected => {
-                    if ui.button("Capture").clicked() {
-                        let _ = self
-                            .camera_cmd_tx
-                            .send(CameraWorkerCommand::CaptureImage { seq: 0 });
+            let (capture_button, capture_button_enabled, capture_command) = match &self.camera_state
+            {
+                CameraWorkerState::Ready => (
+                    egui::Button::new("Capture"),
+                    true,
+                    Some(CameraWorkerCommand::CaptureImage { seq: 0 }),
+                ),
+                _ => (egui::Button::new("Capture"), false, None),
+            };
+            let capture_button = capture_button.min_size(egui::vec2(220.0, 36.0));
+            if ui
+                .add_enabled(capture_button_enabled, capture_button)
+                .clicked()
+                && capture_command.is_some()
+            {
+                let _ = self.camera_cmd_tx.send(capture_command.unwrap());
+            }
+
+            for image in &self.images {
+                match &image.texture {
+                    Some(texture) => {
+                        ui.add(egui::Image::new(ImageSource::Texture(
+                            SizedTexture::from_handle(&texture),
+                        )));
                     }
-                }
-                _ => {}
+                    None => {}
+                };
             }
         });
 

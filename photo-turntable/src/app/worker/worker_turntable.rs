@@ -3,7 +3,10 @@ use crate::{
     turntable::Turntable,
 };
 use anyhow::anyhow;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::{
+    broadcast,
+    mpsc::{UnboundedReceiver, UnboundedSender},
+};
 
 #[derive(Debug, Clone)]
 pub(crate) enum TurntableWorkerState {
@@ -32,7 +35,7 @@ pub(crate) struct TurntableWorker<T: Turntable> {
     cmd_rx: UnboundedReceiver<TurntableWorkerCommand>,
     state_tx: UnboundedSender<TurntableWorkerState>,
     camera_cmd_tx: UnboundedSender<CameraWorkerCommand>,
-    camera_state_rx: UnboundedReceiver<CameraWorkerState>,
+    camera_state_rx: broadcast::Receiver<CameraWorkerState>,
     table: Option<T>,
 }
 
@@ -41,7 +44,7 @@ impl<T: Turntable> TurntableWorker<T> {
         cmd_rx: UnboundedReceiver<TurntableWorkerCommand>,
         state_tx: UnboundedSender<TurntableWorkerState>,
         camera_cmd_tx: UnboundedSender<CameraWorkerCommand>,
-        camera_state_rx: UnboundedReceiver<CameraWorkerState>,
+        camera_state_rx: broadcast::Receiver<CameraWorkerState>,
     ) -> Self {
         Self {
             cmd_rx,
@@ -131,15 +134,21 @@ impl<T: Turntable> TurntableWorker<T> {
                                     };
                                     let _ = self.state_tx.send(state.clone());
 
+                                    // Wait for the camera to be ready before we capture
+                                    while match self.camera_state_rx.recv().await {
+                                        Ok(CameraWorkerState::Ready) => false, // break
+                                        _ => true,                             // keep looping
+                                    } {}
+
                                     let seq = i_rotate as u32;
                                     match self
                                         .camera_cmd_tx
                                         .send(CameraWorkerCommand::CaptureImage { seq })
                                     {
                                         Ok(_) => {
-                                            // Wait for camera worker state to first go to Capturing, then for it to exit Capturing.
+                                            // Wait for camera worker state to first go to Capturing, then exit it
                                             while match self.camera_state_rx.recv().await {
-                                                Some(CameraWorkerState::Capturing {
+                                                Ok(CameraWorkerState::Capturing {
                                                     seq: recvd_seq,
                                                 }) => {
                                                     // If recvd_seq is our requested seq, break.
@@ -147,13 +156,10 @@ impl<T: Turntable> TurntableWorker<T> {
                                                 }
                                                 _ => true, // keep looping
                                             } {}
-                                            // Wait for camera worker state to no longer be Capturing
+                                            // Wait for camera worker state to exit Capturing
                                             while match self.camera_state_rx.recv().await {
-                                                Some(CameraWorkerState::Capturing { seq: _ }) => {
-                                                    true
-                                                }
-                                                None => true,
-                                                _ => false,
+                                                Ok(CameraWorkerState::Capturing { seq: _ }) => true, // keep looping
+                                                _ => false, // keep looping
                                             } {}
                                         }
                                         Err(_) => {

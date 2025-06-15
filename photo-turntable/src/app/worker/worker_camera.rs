@@ -5,17 +5,26 @@ use anyhow::Error;
 use mime2ext::mime2ext;
 use tokio::{
     fs::{self},
-    sync::mpsc::{UnboundedReceiver, UnboundedSender},
+    sync::{
+        broadcast,
+        mpsc::{UnboundedReceiver, UnboundedSender},
+    },
 };
 use uuid::Uuid;
 
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone)]
+pub(crate) struct ImageHandle {
+    pub(crate) seq: u32,
+    pub(crate) path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CameraWorkerState {
     Disconnected,
     GettingCameraList,
     CamerasListed { cameras: Vec<CameraSpec> },
     CameraConnecting,
-    CameraConnected,
+    Ready,
     Capturing { seq: u32 },
 }
 
@@ -29,10 +38,8 @@ pub(crate) enum CameraWorkerCommand {
 struct CameraWorkerStateData {
     /// Receiver for fetching commands
     cmd_rx: UnboundedReceiver<CameraWorkerCommand>,
-    /// Sender for pushing state to the UI
-    state_tx: UnboundedSender<CameraWorkerState>,
-    /// Sender for pushing state to another worker
-    worker_state_tx: UnboundedSender<CameraWorkerState>,
+    /// Sender for pushing state updates
+    state_tx: broadcast::Sender<CameraWorkerState>,
     state: CameraWorkerState,
 }
 
@@ -40,13 +47,15 @@ impl CameraWorkerStateData {
     fn update(&mut self, new_state: CameraWorkerState) {
         self.state = new_state;
         let _ = self.state_tx.send(self.state.clone());
-        let _ = self.worker_state_tx.send(self.state.clone());
     }
 }
 
 /// Tokio worker for managing cameras
 pub(crate) struct CameraWorker {
+    /// Worker state and I/O channels
     state: CameraWorkerStateData,
+    /// Sender for pushing paths of saved images
+    imagepath_tx: UnboundedSender<ImageHandle>,
     camera_context: CameraContext,
     camera: Option<Camera>,
 }
@@ -54,16 +63,16 @@ pub(crate) struct CameraWorker {
 impl CameraWorker {
     pub(crate) fn new(
         cmd_rx: UnboundedReceiver<CameraWorkerCommand>,
-        state_tx: UnboundedSender<CameraWorkerState>,
-        worker_state_tx: UnboundedSender<CameraWorkerState>,
+        state_tx: broadcast::Sender<CameraWorkerState>,
+        imagepath_tx: UnboundedSender<ImageHandle>,
     ) -> Result<Self, Error> {
         Ok(Self {
             state: CameraWorkerStateData {
                 cmd_rx,
                 state_tx,
-                worker_state_tx,
                 state: CameraWorkerState::Disconnected,
             },
+            imagepath_tx,
             camera_context: CameraContext::new()?,
             camera: None,
         })
@@ -98,7 +107,7 @@ impl CameraWorker {
                     match camera_spec.connect(&self.camera_context) {
                         Ok(camera) => {
                             self.camera = Some(camera);
-                            self.state.update(CameraWorkerState::CameraConnected);
+                            self.state.update(CameraWorkerState::Ready);
                         }
                         Err(e) => {
                             eprintln!("Error connecting to camera {}: {:?}", camera_spec.name(), e);
@@ -108,7 +117,7 @@ impl CameraWorker {
                 }
                 CameraWorkerCommand::CaptureImage { seq } => {
                     match (&self.state.state, &self.camera) {
-                        (CameraWorkerState::CameraConnected, Some(camera)) => {
+                        (CameraWorkerState::Ready, Some(camera)) => {
                             self.state.update(CameraWorkerState::Capturing { seq });
                             let image_path = self.generate_temp_image_path();
                             match camera.capture(&image_path) {
@@ -129,11 +138,13 @@ impl CameraWorker {
                                     {
                                         Ok(path) => {
                                             eprintln!("Wrote image to {:?}", path);
-                                            self.state.update(CameraWorkerState::CameraConnected);
+                                            self.state.update(CameraWorkerState::Ready);
+                                            let _ =
+                                                self.imagepath_tx.send(ImageHandle { seq, path });
                                         }
                                         Err(e) => {
                                             eprintln!("Failed to download image: {:?}", e);
-                                            self.state.update(CameraWorkerState::CameraConnected);
+                                            self.state.update(CameraWorkerState::Ready);
                                         }
                                     }
                                 }
