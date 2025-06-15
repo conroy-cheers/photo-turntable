@@ -25,6 +25,7 @@ pub(crate) enum CameraWorkerState {
     CamerasListed { cameras: Vec<CameraSpec> },
     CameraConnecting,
     Ready,
+    Failed,
     Capturing { seq: u32 },
 }
 
@@ -45,6 +46,7 @@ struct CameraWorkerStateData {
 
 impl CameraWorkerStateData {
     fn update(&mut self, new_state: CameraWorkerState) {
+        eprintln!("Publishing state {:?}", new_state);
         self.state = new_state;
         let _ = self.state_tx.send(self.state.clone());
     }
@@ -117,7 +119,7 @@ impl CameraWorker {
                 }
                 CameraWorkerCommand::CaptureImage { seq } => {
                     match (&self.state.state, &self.camera) {
-                        (CameraWorkerState::Ready, Some(camera)) => {
+                        (CameraWorkerState::Ready | CameraWorkerState::Failed, Some(camera)) => {
                             self.state.update(CameraWorkerState::Capturing { seq });
                             let image_path = self.generate_temp_image_path();
                             match camera.capture(&image_path) {
@@ -150,6 +152,7 @@ impl CameraWorker {
                                 }
                                 Err(e) => {
                                     eprintln!("Failed to capture image from camera: {:?}", e);
+                                    self.state.update(CameraWorkerState::Failed);
                                 }
                             }
                         }

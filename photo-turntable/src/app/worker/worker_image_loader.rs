@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
     task::JoinSet,
@@ -42,6 +44,41 @@ pub async fn image_loader(
         if let Err(join_err) = join_res {
             // join_err is a JoinError (panic or cancellation)
             eprintln!("Image‐load task failed: {:?}", join_err);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportJob {
+    pub image_path: PathBuf,
+    pub seq: u32,
+    pub output_directory: PathBuf,
+}
+
+pub async fn image_exporter(mut job_rx: UnboundedReceiver<ExportJob>) {
+    let mut join_set: JoinSet<()> = JoinSet::new();
+
+    while let Some(job) = job_rx.recv().await {
+        join_set.spawn_blocking(move || {
+            let dest_path = job
+                .output_directory
+                .join(format!("image_{}", job.seq))
+                .with_extension("jpg");
+            match std::fs::copy(&job.image_path, &dest_path) {
+                Ok(_) => {}
+                Err(e) => println!(
+                    "Something went wrong trying to copy {:?} to {:?}: {:?}",
+                    job.image_path, dest_path, e
+                ),
+            };
+        });
+    }
+
+    // Wait for all remaining tasks to finish
+    while let Some(join_res) = join_set.join_next().await {
+        if let Err(join_err) = join_res {
+            // join_err is a JoinError (panic or cancellation)
+            eprintln!("Image export task failed: {:?}", join_err);
         }
     }
 }

@@ -1,3 +1,5 @@
+use std::{thread::sleep, time::Duration};
+
 use crate::{
     app::worker::worker_camera::{CameraWorkerCommand, CameraWorkerState},
     turntable::Turntable,
@@ -134,40 +136,52 @@ impl<T: Turntable> TurntableWorker<T> {
                                     };
                                     let _ = self.state_tx.send(state.clone());
 
-                                    // Wait for the camera to be ready before we capture
-                                    while match self.camera_state_rx.recv().await {
-                                        Ok(CameraWorkerState::Ready) => false, // break
-                                        _ => true,                             // keep looping
-                                    } {}
-
                                     let seq = i_rotate as u32;
-                                    match self
-                                        .camera_cmd_tx
-                                        .send(CameraWorkerCommand::CaptureImage { seq })
-                                    {
-                                        Ok(_) => {
-                                            // Wait for camera worker state to first go to Capturing, then exit it
-                                            while match self.camera_state_rx.recv().await {
-                                                Ok(CameraWorkerState::Capturing {
-                                                    seq: recvd_seq,
-                                                }) => {
-                                                    // If recvd_seq is our requested seq, break.
-                                                    recvd_seq != seq
-                                                }
-                                                _ => true, // keep looping
-                                            } {}
-                                            // Wait for camera worker state to exit Capturing
-                                            while match self.camera_state_rx.recv().await {
-                                                Ok(CameraWorkerState::Capturing { seq: _ }) => true, // keep looping
-                                                _ => false, // keep looping
-                                            } {}
-                                        }
-                                        Err(_) => {
-                                            return Err(anyhow!(
-                                                "Unable to send command to camera worker"
-                                            ));
-                                        }
-                                    };
+
+                                    'retry: loop {
+                                        match self
+                                            .camera_cmd_tx
+                                            .send(CameraWorkerCommand::CaptureImage { seq })
+                                        {
+                                            Ok(_) => {
+                                                // Wait for camera worker state to first go to Capturing, then exit it
+                                                eprintln!("Waiting for camera Capturing...");
+                                                while match self.camera_state_rx.recv().await {
+                                                    Ok(CameraWorkerState::Capturing {
+                                                        seq: recvd_seq,
+                                                    }) => {
+                                                        // If recvd_seq is our requested seq, break.
+                                                        recvd_seq != seq
+                                                    }
+                                                    _ => true, // keep looping
+                                                } {}
+                                                // Wait for camera worker state to exit Capturing
+                                                eprintln!("Waiting for camera exit Capturing...");
+                                                while match self.camera_state_rx.recv().await {
+                                                    Ok(CameraWorkerState::Capturing { seq: _ }) => {
+                                                        true
+                                                    } // keep looping
+                                                    Ok(CameraWorkerState::Ready) => {
+                                                        // all done! break from the outer loop
+                                                        break 'retry;
+                                                    }
+                                                    Ok(CameraWorkerState::Failed) => {
+                                                        eprintln!("Capture failed. Retrying after a short delay...");
+                                                        sleep(Duration::from_millis(500));
+                                                        false
+                                                    },
+                                                    _ => false,
+                                                } {}
+                                                eprintln!("Capture finished.");
+                                            }
+                                            Err(_) => {
+                                                return Err(anyhow!(
+                                                    "Unable to send command to camera worker"
+                                                ));
+                                            }
+                                        };
+                                    }
+                                    eprintln!("Stepping...");
                                     tbl.step_horizontal(rotation_steps).await?;
                                 }
                                 if i_tilt < (tilt_steps - 1) {

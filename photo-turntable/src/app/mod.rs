@@ -1,9 +1,11 @@
 mod worker;
 
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use self::worker::{TurntableWorker, TurntableWorkerCommand, TurntableWorkerState};
-use crate::app::worker::{CameraWorker, CameraWorkerCommand, CameraWorkerState};
+use crate::app::worker::{CameraWorker, CameraWorkerCommand, CameraWorkerState, ExportJob};
 use crate::camera::CameraSpec;
 use crate::turntable::Turntable;
 
@@ -13,6 +15,7 @@ use eframe::egui::{
 };
 use eframe::emath::Align;
 use eframe::{egui, App, CreationContext, Frame};
+use rfd::FileDialog;
 use tokio::runtime::Runtime;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -52,8 +55,8 @@ impl ImagePreview {
         // (we use as_deref_mut() to convert from &mut Image<Vec<u8>> into Image<&mut [u8]>)
         decompressor.decompress(&jpeg_data, image.as_deref_mut())?;
 
-        let color_image = ColorImage::from_rgba_unmultiplied([image.width, image.height], &image.pixels);
-
+        let color_image =
+            ColorImage::from_rgba_unmultiplied([image.width, image.height], &image.pixels);
         Ok(Self {
             seq,
             path: path.to_path_buf(),
@@ -91,11 +94,14 @@ pub(crate) struct TurntableApp<T: Turntable> {
     selected_camera_spec: Option<CameraSpec>,
     camera_select_box_open: bool,
     images: Vec<ImagePreview>,
+    export_path: Arc<Mutex<Option<PathBuf>>>,
+    file_picker_request: bool,
     table_cmd_tx: UnboundedSender<TurntableWorkerCommand>,
     table_state_rx: UnboundedReceiver<TurntableWorkerState>,
     camera_cmd_tx: UnboundedSender<CameraWorkerCommand>,
     camera_state_rx: broadcast::Receiver<CameraWorkerState>,
     image_rx: UnboundedReceiver<ImagePreview>,
+    export_job_tx: UnboundedSender<ExportJob>,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -107,6 +113,8 @@ impl<T: Turntable> TurntableApp<T> {
         let (camera_imagepath_tx, camera_imagepath_rx) = mpsc::unbounded_channel();
 
         let (image_tx, image_rx) = mpsc::unbounded_channel();
+
+        let (export_job_tx, export_job_rx) = mpsc::unbounded_channel();
 
         let (table_cmd_tx, table_cmd_rx) = mpsc::unbounded_channel();
         let (table_state_tx, table_state_rx) = mpsc::unbounded_channel();
@@ -138,6 +146,12 @@ impl<T: Turntable> TurntableApp<T> {
             rt.block_on(worker::image_loader(camera_imagepath_rx, image_tx));
         });
 
+        // Spawn image exporter
+        std::thread::spawn(move || {
+            let rt = Runtime::new().unwrap();
+            rt.block_on(worker::image_exporter(export_job_rx));
+        });
+
         Self {
             worker_state: TurntableWorkerState::Uninitialised,
             camera_state: CameraWorkerState::Disconnected,
@@ -148,12 +162,31 @@ impl<T: Turntable> TurntableApp<T> {
             selected_camera_spec: None,
             camera_select_box_open: false,
             images: Vec::new(),
+            export_path: Arc::new(Mutex::new(None)),
+            file_picker_request: false,
             table_cmd_tx,
             table_state_rx,
             camera_cmd_tx,
             camera_state_rx: camera_state_rx_2,
             image_rx,
+            export_job_tx,
             _marker: std::marker::PhantomData,
+        }
+    }
+
+    fn export_jobs(&self) -> Vec<ExportJob> {
+        let output_directory = self.export_path.lock().unwrap();
+        match output_directory.deref() {
+            Some(output_directory) => self
+                .images
+                .iter()
+                .map(|img| ExportJob {
+                    image_path: img.path.clone(),
+                    seq: img.seq,
+                    output_directory: output_directory.clone(),
+                })
+                .collect(),
+            None => Vec::new(),
         }
     }
 }
@@ -331,7 +364,9 @@ impl<T: Turntable> App for TurntableApp<T> {
                         }
                     }
                     match &self.camera_state {
-                        CameraWorkerState::Disconnected | CameraWorkerState::Ready => {}
+                        CameraWorkerState::Disconnected
+                        | CameraWorkerState::Ready
+                        | CameraWorkerState::Failed => {}
                         CameraWorkerState::GettingCameraList
                         | CameraWorkerState::CameraConnecting
                         | CameraWorkerState::Capturing { seq: _ } => {
@@ -362,34 +397,112 @@ impl<T: Turntable> App for TurntableApp<T> {
                     });
             }
 
-            let (capture_button, capture_button_enabled, capture_command) = match &self.camera_state
-            {
-                CameraWorkerState::Ready => (
-                    egui::Button::new("Capture"),
-                    true,
-                    Some(CameraWorkerCommand::CaptureImage { seq: 0 }),
-                ),
-                _ => (egui::Button::new("Capture"), false, None),
-            };
-            let capture_button = capture_button.min_size(egui::vec2(220.0, 36.0));
-            if ui
-                .add_enabled(capture_button_enabled, capture_button)
-                .clicked()
-                && capture_command.is_some()
-            {
-                let _ = self.camera_cmd_tx.send(capture_command.unwrap());
+            let ui_width = ui.available_width() - 18.0;
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui_width, 40.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    let item_width = ui_width / 3.0;
+                    let (capture_button, capture_button_enabled, capture_command) =
+                        match &self.camera_state {
+                            CameraWorkerState::Ready => (
+                                egui::Button::new("Capture"),
+                                true,
+                                Some(CameraWorkerCommand::CaptureImage { seq: 0 }),
+                            ),
+                            _ => (egui::Button::new("Capture"), false, None),
+                        };
+                    ui.add_enabled_ui(capture_button_enabled, |ui| {
+                        if ui.add_sized([item_width, 40.0], capture_button).clicked()
+                            && capture_command.is_some()
+                        {
+                            let _ = self.camera_cmd_tx.send(capture_command.unwrap());
+                        }
+                    });
+
+                    let export_clear_button_enable = !self.images.is_empty();
+                    ui.add_enabled_ui(export_clear_button_enable, |ui| {
+                        if ui
+                            .add_sized([item_width, 40.0], egui::Button::new("Clear"))
+                            .clicked()
+                        {
+                            self.images.clear();
+                        }
+                    });
+                    ui.add_enabled_ui(export_clear_button_enable, |ui| {
+                        if ui
+                            .add_sized([item_width, 40.0], egui::Button::new("Export..."))
+                            .clicked()
+                        {
+                            self.file_picker_request = true;
+                        }
+                    });
+                },
+            );
+
+            // Launch the file picker outside the UI context
+            if self.file_picker_request {
+                self.file_picker_request = false;
+                let export_path_handle = self.export_path.clone();
+                std::thread::spawn(move || {
+                    let mut dialog = FileDialog::new().set_title("Export Images");
+                    match export_path_handle.lock() {
+                        Ok(export) => match &export.deref() {
+                            Some(path) => {
+                                dialog = dialog.set_directory(path.clone());
+                            }
+                            None => {}
+                        },
+                        Err(e) => {
+                            eprintln!("Couldn't lock read old export path for reading: {:?}", e);
+                        }
+                    }
+                    if let Some(path) = dialog.pick_folder() {
+                        println!("Export path selected: {:?}", path.display());
+                        let mut export_path = export_path_handle.lock().unwrap();
+                        export_path.replace(path);
+                    }
+                });
             }
 
-            for image in &self.images {
-                match &image.texture {
-                    Some(texture) => {
-                        ui.add(egui::Image::new(ImageSource::Texture(
-                            SizedTexture::from_handle(&texture),
-                        )));
-                    }
-                    None => {}
-                };
+            // Dispatch export jobs, if they exist
+            let export_jobs = self.export_jobs();
+            if !export_jobs.is_empty() {
+                for job in &export_jobs {
+                    let _ = self.export_job_tx.send(job.clone());
+                }
+                let mut export_path = self.export_path.lock().unwrap();
+                *export_path = None;
+                eprintln!("Exported {} images", export_jobs.len());
             }
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                const COLUMNS: usize = 4;
+                const SPACING: f32 = 10.0;
+                let img_width = ui.available_width() / (COLUMNS as f32) - SPACING;
+
+                egui::Grid::new("image_grid")
+                    .num_columns(COLUMNS)
+                    .spacing([SPACING, SPACING])
+                    .show(ui, |ui| {
+                        for (i, image) in self.images.iter().enumerate() {
+                            match &image.texture {
+                                Some(texture) => {
+                                    ui.add(
+                                        egui::Image::new(ImageSource::Texture(
+                                            SizedTexture::from_handle(&texture),
+                                        ))
+                                        .max_width(img_width),
+                                    );
+                                    if i > 0 && (i + 1) % 4 == 0 {
+                                        ui.end_row();
+                                    }
+                                }
+                                None => {}
+                            };
+                        }
+                    })
+            })
         });
 
         // keep repainting so progress animates
