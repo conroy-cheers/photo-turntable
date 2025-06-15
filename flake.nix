@@ -33,6 +33,9 @@
               inherit system;
               overlays = [
                 rust-overlay.overlays.default
+                (self: super: {
+                  rustToolchain = self.rust-bin.stable.latest.default.override { extensions = [ "rust-src" ]; };
+                })
               ];
             };
           }
@@ -59,6 +62,14 @@
         {
           default = pkgs.mkShellNoCC {
             inputsFrom = [ (build pkgs) ];
+            packages = with pkgs; [
+              pkg-config
+              clippy
+            ];
+            env = {
+              RUST_BACKTRACE = "1";
+              RUST_SRC_PATH = "${pkgs.rustToolchain}/lib/rustlib/src/rust/library";
+            };
           };
         }
       );
