@@ -96,6 +96,7 @@ pub(crate) struct TurntableApp<T: Turntable> {
     images: Vec<ImagePreview>,
     export_path: Arc<Mutex<Option<PathBuf>>>,
     file_picker_request: bool,
+    capture_delay_ms: u64,
     table_cmd_tx: UnboundedSender<TurntableWorkerCommand>,
     table_state_rx: UnboundedReceiver<TurntableWorkerState>,
     camera_cmd_tx: UnboundedSender<CameraWorkerCommand>,
@@ -164,6 +165,7 @@ impl<T: Turntable> TurntableApp<T> {
             images: Vec::new(),
             export_path: Arc::new(Mutex::new(None)),
             file_picker_request: false,
+            capture_delay_ms: 500,
             table_cmd_tx,
             table_state_rx,
             camera_cmd_tx,
@@ -289,6 +291,7 @@ impl<T: Turntable> App for TurntableApp<T> {
                                     tilt_lower: self.tilt_slider_low_deg,
                                     tilt_upper: self.tilt_slider_high_deg,
                                     tilt_steps: self.tilt_steps,
+                                    delay_ms: self.capture_delay_ms,
                                 });
                             }
                         });
@@ -397,6 +400,11 @@ impl<T: Turntable> App for TurntableApp<T> {
                     });
             }
 
+            ui.horizontal(|ui| {
+                ui.add(egui::Label::new("Delay between captures (ms):"));
+                ui.style_mut().spacing.slider_width = ui.available_width() - 50.0;
+                ui.add(egui::Slider::new(&mut self.capture_delay_ms, 0..=2000).show_value(true));
+            });
             let ui_width = ui.available_width() - 18.0;
             ui.allocate_ui_with_layout(
                 Vec2::new(ui_width, 40.0),
@@ -408,7 +416,10 @@ impl<T: Turntable> App for TurntableApp<T> {
                             CameraWorkerState::Ready => (
                                 egui::Button::new("Capture"),
                                 true,
-                                Some(CameraWorkerCommand::CaptureImage { seq: 0 }),
+                                Some(CameraWorkerCommand::CaptureImage {
+                                    seq: 0,
+                                    extra_delay_ms: 0,
+                                }),
                             ),
                             _ => (egui::Button::new("Capture"), false, None),
                         };

@@ -29,6 +29,7 @@ pub(crate) enum TurntableWorkerCommand {
         tilt_lower: i16,
         tilt_upper: i16,
         tilt_steps: u16,
+        delay_ms: u64,
     },
 }
 
@@ -111,6 +112,7 @@ impl<T: Turntable> TurntableWorker<T> {
                     tilt_lower,
                     tilt_upper,
                     tilt_steps,
+                    delay_ms,
                 } => {
                     if let Some(tbl) = self.table.as_mut() {
                         let tilt_step_size =
@@ -141,7 +143,7 @@ impl<T: Turntable> TurntableWorker<T> {
                                     'retry: loop {
                                         match self
                                             .camera_cmd_tx
-                                            .send(CameraWorkerCommand::CaptureImage { seq })
+                                            .send(CameraWorkerCommand::CaptureImage { seq, extra_delay_ms: delay_ms })
                                         {
                                             Ok(_) => {
                                                 // Wait for camera worker state to first go to Capturing, then exit it

@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, time::Duration};
 
 use crate::camera::{Camera, CameraContext, CameraSpec};
 use anyhow::Error;
@@ -8,7 +8,7 @@ use tokio::{
     sync::{
         broadcast,
         mpsc::{UnboundedReceiver, UnboundedSender},
-    },
+    }, time::sleep,
 };
 use uuid::Uuid;
 
@@ -33,7 +33,7 @@ pub(crate) enum CameraWorkerState {
 pub(crate) enum CameraWorkerCommand {
     ListCameras,
     ConnectToCamera { camera_spec: CameraSpec },
-    CaptureImage { seq: u32 },
+    CaptureImage { seq: u32, extra_delay_ms: u64 },
 }
 
 struct CameraWorkerStateData {
@@ -117,12 +117,13 @@ impl CameraWorker {
                         }
                     }
                 }
-                CameraWorkerCommand::CaptureImage { seq } => {
+                CameraWorkerCommand::CaptureImage { seq, extra_delay_ms } => {
                     match (&self.state.state, &self.camera) {
                         (CameraWorkerState::Ready | CameraWorkerState::Failed, Some(camera)) => {
                             self.state.update(CameraWorkerState::Capturing { seq });
                             let image_path = self.generate_temp_image_path();
-                            match camera.capture(&image_path) {
+                            sleep(Duration::from_millis(extra_delay_ms)).await;
+                            match camera.capture(&image_path).await {
                                 Ok(camera_file) => {
                                     match async || -> anyhow::Result<PathBuf> {
                                         // Rename output file with appropriate extension, if available

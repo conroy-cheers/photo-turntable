@@ -45,14 +45,12 @@ pub(crate) struct Camera {
 }
 
 impl Camera {
-    pub(crate) fn capture(&self, path: &Path) -> Result<CameraFile, Error> {
+    pub(crate) async fn capture(&self, path: &Path) -> Result<CameraFile, Error> {
         let camera_fs = self.device.fs();
 
         // And take pictures
-        let file_path = self.device.capture_image().wait()?;
-        // let preview = camera_fs
-        //     .download_preview(&file_path.folder(), &file_path.name())
-        //     .wait()?;
+        let file_path = self.device.capture_image().await?;
+
         let file = camera_fs
             .download_to(&file_path.folder(), &file_path.name(), path)
             .wait()?;
