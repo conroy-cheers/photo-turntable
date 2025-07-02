@@ -23,7 +23,6 @@ pub trait Turntable: Sized + Send + Sync + 'static {
     async fn reset_tilt(&mut self) -> Result<(), anyhow::Error>;
     async fn step_horizontal(&mut self, horizontal_steps: u16) -> Result<(), anyhow::Error>;
     async fn step_tilt(&mut self, tilt_step_deg: f32) -> Result<(), anyhow::Error>;
-    fn compute_tilt_step(tilt_lower: i16, tilt_upper: i16, tilt_steps: u16) -> f32;
 }
 
 impl Turntable for RevoTurntable {
@@ -81,9 +80,5 @@ impl Turntable for RevoTurntable {
         ))
         .await;
         Ok(())
-    }
-
-    fn compute_tilt_step(tilt_lower: i16, tilt_upper: i16, tilt_steps: u16) -> f32 {
-        (tilt_upper - tilt_lower) as f32 / tilt_steps as f32
     }
 }

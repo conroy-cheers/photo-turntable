@@ -8,7 +8,8 @@ use tokio::{
     sync::{
         broadcast,
         mpsc::{UnboundedReceiver, UnboundedSender},
-    }, time::sleep,
+    },
+    time::sleep,
 };
 use uuid::Uuid;
 
@@ -33,6 +34,7 @@ pub(crate) enum CameraWorkerState {
 pub(crate) enum CameraWorkerCommand {
     ListCameras,
     ConnectToCamera { camera_spec: CameraSpec },
+    Disconnect,
     CaptureImage { seq: u32, extra_delay_ms: u64 },
 }
 
@@ -117,9 +119,15 @@ impl CameraWorker {
                         }
                     }
                 }
-                CameraWorkerCommand::CaptureImage { seq, extra_delay_ms } => {
+                CameraWorkerCommand::Disconnect => {
+                    self.state.update(CameraWorkerState::Disconnected);
+                }
+                CameraWorkerCommand::CaptureImage {
+                    seq,
+                    extra_delay_ms,
+                } => {
                     match (&self.state.state, &self.camera) {
-                        (CameraWorkerState::Ready | CameraWorkerState::Failed, Some(camera)) => {
+                        (CameraWorkerState::Ready, Some(camera)) => {
                             self.state.update(CameraWorkerState::Capturing { seq });
                             let image_path = self.generate_temp_image_path();
                             sleep(Duration::from_millis(extra_delay_ms)).await;
@@ -157,8 +165,17 @@ impl CameraWorker {
                                 }
                             }
                         }
-                        _ => {
+                        (CameraWorkerState::Failed, Some(_)) => {
+                            eprintln!("Requested image capture and we have a camera, but state is still Failed");
+                            // Turntable worker waits for Capturing state as an acknowledgement.
+                            self.state.update(CameraWorkerState::Capturing { seq });
+                            self.state.update(CameraWorkerState::Failed);
+                        }
+                        (other, _) => {
                             eprintln!("Requested image capture, but no camera is connected!");
+                            let new = other.clone();
+                            self.state.update(CameraWorkerState::Capturing { seq });
+                            self.state.update(new);
                         }
                     }
                 }

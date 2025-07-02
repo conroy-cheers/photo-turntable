@@ -17,7 +17,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
   version = "0.1.0";
 
   src = ./photo-turntable;
-  cargoHash = "sha256-ajkQwrXQAsKS7XXpvnaR+OQI7MfPUHjt0/ARfEbXagQ=";
+  cargoHash = "sha256-nUksGCNYQid4uPFO3SBOHfByqD9LjPgKWHd7v6Bfbhs=";
 
   buildInputs = [
     libgphoto2

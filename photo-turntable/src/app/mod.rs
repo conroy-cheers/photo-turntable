@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use self::worker::{TurntableWorker, TurntableWorkerCommand, TurntableWorkerState};
-use crate::app::worker::{CameraWorker, CameraWorkerCommand, CameraWorkerState, ExportJob};
+use crate::app::worker::{
+    CameraWorker, CameraWorkerCommand, CameraWorkerState, ExportJob, TurntableSteppingJob,
+};
 use crate::camera::CameraSpec;
 use crate::turntable::Turntable;
 
@@ -191,6 +193,13 @@ impl<T: Turntable> TurntableApp<T> {
             None => Vec::new(),
         }
     }
+
+    fn next_seq(&self) -> u32 {
+        match self.images.iter().map(|img| img.seq).max() {
+            Some(max) => max + 1,
+            None => 0,
+        }
+    }
 }
 
 impl<T: Turntable> App for TurntableApp<T> {
@@ -238,15 +247,13 @@ impl<T: Turntable> App for TurntableApp<T> {
 
                 // Progress indicator
                 ui.add_space(12.0);
-                let progress = match self.worker_state {
+                let progress = match &self.worker_state {
                     TurntableWorkerState::Uninitialised => 1.0,
                     TurntableWorkerState::Connecting => 1.0,
                     TurntableWorkerState::Connected => 1.0,
                     TurntableWorkerState::ReturningToResetPosition => 1.0,
-                    TurntableWorkerState::Stepping {
-                        step_count,
-                        steps_total,
-                    } => step_count as f32 / steps_total as f32,
+                    TurntableWorkerState::Stepping(stepping_state) => stepping_state.progress(),
+                    TurntableWorkerState::Paused(stepping_state) => stepping_state.progress(),
                 };
 
                 let progress_bar = egui::ProgressBar::new(progress);
@@ -255,7 +262,10 @@ impl<T: Turntable> App for TurntableApp<T> {
                     TurntableWorkerState::Connecting => progress_bar,
                     TurntableWorkerState::Connected => progress_bar.fill(Color32::LIGHT_GREEN),
                     TurntableWorkerState::ReturningToResetPosition => progress_bar,
-                    TurntableWorkerState::Stepping { .. } => progress_bar.show_percentage(),
+                    TurntableWorkerState::Stepping(_) => progress_bar.show_percentage(),
+                    TurntableWorkerState::Paused(_) => {
+                        progress_bar.show_percentage().text("Paused")
+                    }
                 });
 
                 // Reset/step controls
@@ -264,8 +274,10 @@ impl<T: Turntable> App for TurntableApp<T> {
                     Vec2::new(ui.available_width(), 40.0),
                     Layout::left_to_right(Align::Center),
                     |ui| {
-                        let enable_moves = match self.worker_state {
-                            TurntableWorkerState::Connected => true,
+                        let enable_moves = match &self.worker_state {
+                            TurntableWorkerState::Connected
+                            | TurntableWorkerState::Stepping(_)
+                            | TurntableWorkerState::Paused(_) => true,
                             _ => false,
                         };
                         ui.add_enabled_ui(enable_moves, |ui| {
@@ -281,18 +293,51 @@ impl<T: Turntable> App for TurntableApp<T> {
                                     .send(TurntableWorkerCommand::ResetPosition);
                             }
                         });
-                        ui.add_enabled_ui(enable_moves, |ui| {
-                            if ui
-                                .add_sized([ui.available_width(), 40.0], egui::Button::new("Step"))
-                                .clicked()
-                            {
-                                let _ = self.table_cmd_tx.send(TurntableWorkerCommand::Step {
-                                    rotation_steps: self.slider_steps,
-                                    tilt_lower: self.tilt_slider_low_deg,
-                                    tilt_upper: self.tilt_slider_high_deg,
-                                    tilt_steps: self.tilt_steps,
-                                    delay_ms: self.capture_delay_ms,
-                                });
+                        ui.add_enabled_ui(enable_moves, |ui| match &self.worker_state {
+                            TurntableWorkerState::Stepping(_) => {
+                                if ui
+                                    .add_sized(
+                                        [ui.available_width(), 40.0],
+                                        egui::Button::new("Pause"),
+                                    )
+                                    .clicked()
+                                {
+                                    let _ = self
+                                        .table_cmd_tx
+                                        .send(TurntableWorkerCommand::PauseStepping);
+                                }
+                            }
+                            TurntableWorkerState::Paused(_) => {
+                                if ui
+                                    .add_sized(
+                                        [ui.available_width(), 40.0],
+                                        egui::Button::new("Resume"),
+                                    )
+                                    .clicked()
+                                {
+                                    let _ = self
+                                        .table_cmd_tx
+                                        .send(TurntableWorkerCommand::ResumeStepping);
+                                }
+                            }
+                            _ => {
+                                if ui
+                                    .add_sized(
+                                        [ui.available_width(), 40.0],
+                                        egui::Button::new("Capture"),
+                                    )
+                                    .clicked()
+                                {
+                                    let _ = self.table_cmd_tx.send(TurntableWorkerCommand::Step {
+                                        job: TurntableSteppingJob {
+                                            rotation_steps: self.slider_steps,
+                                            tilt_lower: self.tilt_slider_low_deg as f32,
+                                            tilt_upper: self.tilt_slider_high_deg as f32,
+                                            tilt_steps: self.tilt_steps,
+                                            capture_delay_ms: self.capture_delay_ms,
+                                        },
+                                    });
+                                }
                             }
                         });
                     },
@@ -389,10 +434,23 @@ impl<T: Turntable> App for TurntableApp<T> {
                             }
                         }
                     }
+                    match &self.camera_state {
+                        CameraWorkerState::Ready
+                        | CameraWorkerState::Failed
+                        | CameraWorkerState::CamerasListed { .. } => {
+                            if ui.small_button("Disconnect").clicked() {
+                                self.selected_camera_spec = None;
+                                let _ = self.camera_cmd_tx.send(CameraWorkerCommand::Disconnect);
+                            }
+                        }
+                        _ => {}
+                    }
                 });
             self.camera_select_box_open = camera_select_box_open;
 
-            if self.selected_camera_spec != previous_selected_camera_spec {
+            if self.selected_camera_spec != previous_selected_camera_spec
+                && self.selected_camera_spec.is_some()
+            {
                 let _ = self
                     .camera_cmd_tx
                     .send(CameraWorkerCommand::ConnectToCamera {
@@ -417,7 +475,7 @@ impl<T: Turntable> App for TurntableApp<T> {
                                 egui::Button::new("Capture"),
                                 true,
                                 Some(CameraWorkerCommand::CaptureImage {
-                                    seq: 0,
+                                    seq: self.next_seq(),
                                     extra_delay_ms: 0,
                                 }),
                             ),
@@ -480,6 +538,10 @@ impl<T: Turntable> App for TurntableApp<T> {
             let export_jobs = self.export_jobs();
             if !export_jobs.is_empty() {
                 for job in &export_jobs {
+                    eprintln!(
+                        "Running export job for image {:?} -> {:?}",
+                        job.image_path, job.seq
+                    );
                     let _ = self.export_job_tx.send(job.clone());
                 }
                 let mut export_path = self.export_path.lock().unwrap();
