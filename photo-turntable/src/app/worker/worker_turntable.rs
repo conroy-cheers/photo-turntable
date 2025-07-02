@@ -106,6 +106,8 @@ impl<T: Turntable> TurntableWorker<T> {
     /// Trigger taking a photo, and wait until it either succeeds or fails.
     async fn sync_take_photo(&mut self, state: &TurntableSteppingState) -> anyhow::Result<()> {
         let seq = state.overall_step();
+        // Drain any unhandled camera states (e.g. from manual captures)
+        while let Ok(_) = self.camera_state_rx.try_recv() {}
         match self.camera_cmd_tx.send(CameraWorkerCommand::CaptureImage {
             seq,
             extra_delay_ms: state.job.capture_delay_ms,
