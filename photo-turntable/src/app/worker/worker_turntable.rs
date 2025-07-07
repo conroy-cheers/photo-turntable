@@ -19,7 +19,7 @@ pub(crate) struct TurntableSteppingJob {
 
 impl TurntableSteppingJob {
     fn tilt_step_size(&self) -> f32 {
-        (self.tilt_upper - self.tilt_lower) / self.tilt_steps as f32
+        (self.tilt_upper - self.tilt_lower) / (self.tilt_steps - 1) as f32
     }
 }
 
@@ -99,7 +99,7 @@ impl<T: Turntable> TurntableWorker<T> {
         // Zero tilt
         tbl.reset_tilt().await?;
         // Tilt to lower tilt position
-        tbl.step_tilt(tilt_lower as f32).await?;
+        tbl.step_tilt(0.0, tilt_lower as f32).await?;
         Ok(())
     }
 
@@ -155,7 +155,12 @@ impl<T: Turntable> TurntableWorker<T> {
                     match new_rotation_step % from_state.job.rotation_steps {
                         0 => {
                             // Time to also tilt step
-                            tbl.step_tilt(from_state.job.tilt_step_size()).await?;
+                            let old_tilt_pos = from_state.job.tilt_lower
+                                + (from_state.tilt_step as f32) * from_state.job.tilt_step_size();
+                            let new_tilt_pos = old_tilt_pos + from_state.job.tilt_step_size();
+                            eprintln!("Tilting from {} to {} degrees", old_tilt_pos, new_tilt_pos);
+                            tbl.step_tilt(old_tilt_pos, new_tilt_pos).await?;
+                            eprintln!("Done!");
                             (0, from_state.tilt_step + 1)
                         }
                         step => (step, from_state.tilt_step),
@@ -248,16 +253,13 @@ impl<T: Turntable> TurntableWorker<T> {
             }
             TurntableWorkerCommand::Step { job } => {
                 if let TurntableWorkerState::Connected = state {
-                    // Take first step
-                    match self
-                        .capture_step(&TurntableSteppingState {
+                    // Set initial position and request to start stepping
+                    match self.zero_position(job.tilt_lower).await {
+                        Ok(_) => TurntableWorkerState::Stepping(TurntableSteppingState {
                             job: job.clone(),
                             rotation_step: 0,
                             tilt_step: 0,
-                        })
-                        .await
-                    {
-                        Ok(new_state) => new_state,
+                        }),
                         Err(_) => state.clone(),
                     }
                 } else {

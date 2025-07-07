@@ -16,8 +16,8 @@ pub enum Command {
     /// Continuous rotation: -1 for left infinite, 1 for right infinite.
     ContinuousRotation(i8),
 
-    /// Tilt by value in degrees. Positive tilts right/up, negative tilts left/down.
-    TiltBy(f32),
+    /// Tilt to position in degrees. Positive tilts right/up, negative tilts left/down.
+    TiltTo(f32),
     /// Stop tilt immediately.
     StopTilt,
     /// Zero tilt value (go to neutral).
@@ -40,7 +40,7 @@ impl Command {
             Command::StopRotation => "+CT,STOP;".into(),
             Command::ZeroRotation => "+CT,TOZERO;".into(),
             Command::ContinuousRotation(dir) => format!("+CT,TURNCONTINUE={};", dir),
-            Command::TiltBy(val) => format!("+CR,TILTVALUE={:.2};", val),
+            Command::TiltTo(val) => format!("+CR,TILTVALUE={:.2};", val),
             Command::StopTilt => "+CR,STOP;".into(),
             Command::ZeroTilt => "+CR,TOZERO;".into(),
             Command::QueryAngle => "+QT,CHANGEANGLE;".into(),
